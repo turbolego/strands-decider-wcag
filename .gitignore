@@ -13,6 +13,9 @@ data/**/*.jsonl.gz
 !data/synthetic/*.jsonl
 # ...and the generator exports, committed as written (data/generators/)
 !data/generators/**/*.jsonl
+# WCAG training data
+!data/wcag/*.jsonl
+!data/wcag/chunks.jsonl
 # ...but never a run's API error log (data/generators/README.md)
 data/generators/**/failures*.jsonl
 *.log
