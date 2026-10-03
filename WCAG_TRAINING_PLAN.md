@@ -461,3 +461,164 @@ strands-decider serve ./checkpoints/hobson-2b-wcag --port 8000 &
 - [Axe-core](https://github.com/dequelabs/axe-core) — WCAG scanning engine
 - [WCAG 2.2 Guidelines](https://www.w3.org/WAI/WCAG22/quickref/) — rule reference
 - [Kaggle: Web Accessibility Compliance Dataset](https://www.kaggle.com/search?q=web+accessibility+compliance) — public axe-core exports
+
+## Semantic HTML Chunking
+
+When evaluating a full webpage DOM, you cannot split HTML arbitrarily (e.g., every 3000 tokens) because doing so might sever an `<input>` from its `<label>`, or an `aria-controls` ID from its target, producing false positives.
+
+Strands Decider's torso uses the Qwen3.5-2B architecture, so chunk sizes must be measured with Qwen's tokenizer. The following parser uses BeautifulSoup to strip accessibility-irrelevant noise, target semantic HTML5 landmarks, and recursively chunk elements that exceed the token limit while preserving HTML structure.
+
+### The Chunker Script
+
+```python
+import warnings
+from bs4 import BeautifulSoup, NavigableString
+from transformers import AutoTokenizer
+
+warnings.filterwarnings("ignore")
+
+class SemanticHTMLChunker:
+    def __init__(self, model_name="Qwen/Qwen1.5-1.8B", max_tokens=3500):
+        # 3500 tokens leaves ~500 for prompt + questions
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.max_tokens = max_tokens
+
+        self.semantic_boundaries = [
+            'header', 'nav', 'main', 'form', 'article',
+            'section', 'aside', 'footer', 'dialog', 'table'
+        ]
+
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text))
+
+    def clean_dom(self, html_content: str) -> BeautifulSoup:
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # Remove tags that bloat tokens without affecting WCAG rules
+        for tag in soup(['script', 'style', 'noscript', 'meta', 'link']):
+            tag.decompose()
+
+        # SVGs are massive token hogs. Keep title/desc for accessibility checks, gut paths.
+        for svg in soup.find_all('svg'):
+            title = svg.find('title')
+            desc = svg.find('desc')
+            svg.clear()
+            if title: svg.append(title)
+            if desc: svg.append(desc)
+            svg.append(soup.new_string("<!-- SVG paths removed -->"))
+
+        # Remove HTML comments
+        for element in soup(text=lambda text: isinstance(text, bs4.Comment)):
+            element.extract()
+
+        return soup
+
+    def chunk_node(self, node) -> list[str]:
+        """Recursively chunks a BeautifulSoup node to fit token limits."""
+        node_html = str(node)
+
+        if self.count_tokens(node_html) <= self.max_tokens:
+            return [node_html]
+
+        if isinstance(node, NavigableString):
+            return [node_html[:self.max_tokens * 3]]
+
+        chunks = []
+        current_chunk = []
+        current_tokens = 0
+
+        parent_open_tag = f"<{node.name}"
+        for attr, value in node.attrs.items():
+            if isinstance(value, list):
+                value = " ".join(value)
+            parent_open_tag += f' {attr}="{value}"'
+        parent_open_tag += ">"
+        parent_close_tag = f"</{node.name}>"
+
+        wrapper_tokens = self.count_tokens(parent_open_tag + parent_close_tag)
+
+        for child in node.children:
+            child_html = str(child)
+            child_tokens = self.count_tokens(child_html)
+
+            if child_tokens > (self.max_tokens - wrapper_tokens):
+                if current_chunk:
+                    html_str = parent_open_tag + "".join(current_chunk) + parent_close_tag
+                    chunks.append(html_str)
+                    current_chunk = []
+                    current_tokens = 0
+                chunks.extend(self.chunk_node(child))
+
+            elif current_tokens + child_tokens + wrapper_tokens > self.max_tokens:
+                html_str = parent_open_tag + "".join(current_chunk) + parent_close_tag
+                chunks.append(html_str)
+                current_chunk = [child_html]
+                current_tokens = child_tokens
+            else:
+                current_chunk.append(child_html)
+                current_tokens += child_tokens
+
+        if current_chunk:
+            html_str = parent_open_tag + "".join(current_chunk) + parent_close_tag
+            chunks.append(html_str)
+
+        return chunks
+
+    def process_page(self, html_content: str) -> list[str]:
+        soup = self.clean_dom(html_content)
+        body = soup.find('body')
+        if not body:
+            return []
+
+        final_chunks = []
+
+        # Extract semantic landmarks first
+        for tag_name in self.semantic_boundaries:
+            for el in body.find_all(tag_name, recursive=True):
+                extracted = el.extract()
+                final_chunks.extend(self.chunk_node(extracted))
+
+        # Process remaining body content
+        final_chunks.extend(self.chunk_node(body))
+
+        return final_chunks
+```
+
+### How It Works
+
+**Targeted extraction.** The parser hunts for standalone functional areas (`<form>`, `<nav>`, `<main>`). WCAG violations often occur within these units (e.g., an inaccessible login form). Isolating them gives the model focused context without surrounding page clutter.
+
+**SVG gutting.** SVGs contain thousands of `<path>` coordinates that destroy context windows. The script strips geometry but preserves `<title>` and `<desc>` so the model can still audit WCAG 1.1.1 (Non-text Content).
+
+**Parent re-wrapping.** If a large `<main>` must be split, the script rebuilds the parent tags so both chunks are syntactically valid HTML:
+```
+<main class="layout"> [Chunk 1 content] </main>
+<main class="layout"> [Chunk 2 content] </main>
+```
+
+### Usage
+
+```python
+chunker = SemanticHTMLChunker(max_tokens=3000)
+states = chunker.process_page(html_content)
+
+for i, state in enumerate(states):
+    token_count = chunker.count_tokens(state)
+    print(f"State {i+1}: {token_count} tokens")
+    # Feed state into training data JSONL
+```
+
+### Integration with Training Pipeline
+
+The chunker feeds into step 2 (Extract and Format Webpage States) of the training plan. Each chunk becomes one `state` field in a training row:
+
+```json
+{
+  "state": "<form class="login">
+  <label for="email">Email</label>
+  <input id="email" type="text">
+</form>",
+  "questions": { "wcag_3_3_2_labels": { "type": "noul", "instructions": "Does every input have a label?" } },
+  "answers": { "wcag_3_3_2_labels": { "type": "noul", "noul": 0 } }
+}
+```
