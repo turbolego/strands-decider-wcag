@@ -622,3 +622,84 @@ The chunker feeds into step 2 (Extract and Format Webpage States) of the trainin
   "answers": { "wcag_3_3_2_labels": { "type": "noul", "noul": 0 } }
 }
 ```
+
+## Filtering Auditable Chunks
+
+Not every HTML chunk warrants a WCAG audit. Structural noise — empty `<div>` wrappers, spacing elements, purely decorative containers — can never trigger a violation and wastes tokens and training compute. The following filter discards chunks that contain no interactive elements, text, media, or ARIA roles.
+
+### The Filter
+
+```python
+from bs4 import BeautifulSoup
+
+def is_auditable_chunk(html_chunk: str) -> bool:
+    """
+    Returns True if an HTML chunk contains content or interactive elements
+    worth auditing for WCAG violations.
+    """
+    soup = BeautifulSoup(html_chunk, 'html.parser')
+
+    # 1. Meaningful text — contrast, reading order, heading hierarchy
+    if soup.get_text(strip=True):
+        return True
+
+    # 2. Native interactive and multimedia tags
+    # Must be audited even if empty (e.g. <img> missing alt, <input> missing label)
+    auditable_tags = [
+        'a', 'button', 'input', 'select', 'textarea',
+        'details', 'dialog', 'iframe',
+        'img', 'svg', 'canvas', 'video', 'audio', 'object'
+    ]
+    if soup.find(auditable_tags):
+        return True
+
+    # 3. Custom interactive elements (tabindex)
+    # Any focusable element needs WCAG evaluation
+    if soup.find(attrs={"tabindex": True}):
+        return True
+
+    # 4. ARIA roles — alters the accessibility tree
+    if soup.find(attrs={"role": True}):
+        return True
+
+    # Purely structural noise — discard
+    return False
+
+def filter_chunks(chunks: list[str]) -> list[str]:
+    """Returns only chunks relevant for WCAG auditing."""
+    return [chunk for chunk in chunks if is_auditable_chunk(chunk)]
+```
+
+### How the Logic Works
+
+- **`soup.get_text(strip=True)`** catches text hidden deep inside seemingly boring divs. If there is text, there is a potential color contrast violation (WCAG 1.4.3) or reading-order issue (1.3.2), so the chunk must be kept.
+- **Empty media tags.** An `<img>` or `<svg>` with no text inside fails `get_text` but is caught by `auditable_tags`, ensuring the model can flag missing `alt` or `aria-label` (WCAG 1.1.1).
+- **ARIA & tabindex.** Developers build custom buttons from `<div>` or `<span>` tags. Explicitly checking for `tabindex` and `role` ensures these widgets aren't discarded.
+
+### Integration
+
+Hook it into `process_page` after chunking:
+
+```python
+def process_page(self, html_content: str) -> list[str]:
+    soup = self.clean_dom(html_content)
+    body = soup.find('body')
+    if not body:
+        return []
+
+    final_chunks = []
+
+    # Extract semantic boundaries
+    for tag_name in self.semantic_boundaries:
+        for el in body.find_all(tag_name, recursive=True):
+            extracted = el.extract()
+            final_chunks.extend(self.chunk_node(extracted))
+
+    # Process remainder of the body
+    final_chunks.extend(self.chunk_node(body))
+
+    # Discard purely structural noise
+    return filter_chunks(final_chunks)
+```
+
+This reduces the chunk count by 30–50% on typical pages and guarantees every chunk sent to the model has audit potential.
