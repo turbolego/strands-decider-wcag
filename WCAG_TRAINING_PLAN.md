@@ -832,6 +832,122 @@ Additional rules to capture beyond the starter set above:
 | `list-role-mismatch` | Is the ARIA role appropriate for list elements? |
 | `parsing` | Is the HTML syntactically valid? |
 | `presentation-role-conflict` | Is there a conflict between role and presentation semantics? |
+
+## Axe-Core JSON → JSONL Converter
+
+When you have a pre-generated axe-core JSON report (from axe-core CLI, axe DevTools export, or CI pipelines), this script inverts the data hierarchy — axe-core groups by Rule → Nodes, but Strands Decider needs State (Node) → Rules.
+
+### The Converter Script
+
+```python
+import json
+from collections import defaultdict
+
+RULE_QUESTIONS = {
+    "image-alt":            "Does this HTML snippet provide alternative text for all images?",
+    "button-name":          "Do all buttons in this snippet have discernible text?",
+    "label":                "Are all form inputs in this snippet properly associated with a label?",
+    "link-name":            "Do all links in this snippet have discernible text?",
+    "aria-roles":           "Are all ARIA roles used in this snippet valid?",
+    "aria-valid-attr-value":"Do all ARIA attributes in this snippet have valid values?",
+    "tabindex":             "Are tabindex attribute values appropriately set to prevent keyboard traps?",
+    "html-has-lang":        "Does the html element have a lang attribute?",
+    "heading-order":        "Is the heading hierarchy logical and ascending?",
+    "ident-unique":         "Are all IDs in this snippet unique?",
+    "meta-viewport":        "Does this snippet include a usable meta viewport tag?",
+}
+
+def generate_instruction(rule_id: str, axe_description: str) -> str:
+    """Mapped question, or fallback that wraps Axe's description into a Yes/No question."""
+    if rule_id in RULE_QUESTIONS:
+        return RULE_QUESTIONS[rule_id]
+    return f"Does this HTML snippet meet the requirement: {axe_description}?"
+
+def convert_axe_to_strands(axe_json_path: str, output_jsonl_path: str) -> None:
+    """
+    Converts a static axe-core JSON report into Strands Decider JSONL format.
+    Groups all passes and violations by their specific HTML snippet.
+    """
+    state_map: dict[str, dict[str, dict[str, any]]] = defaultdict(dict)
+
+    with open(axe_json_path, 'r', encoding='utf-8') as f:
+        axe_data = json.load(f)
+
+    def process_rules(rules_list: list, is_pass: bool) -> None:
+        for rule in rules_list:
+            rule_id = rule.get("id")
+            if rule_id == "color-contrast":  # model cannot evaluate without CSS
+                continue
+
+            description = rule.get("description", "")
+            status = 1 if is_pass else 0
+
+            for node in rule.get("nodes", []):
+                html_snippet = node.get("html")
+                if not html_snippet:
+                    continue
+
+                state_map[html_snippet][rule_id] = {
+                    "status": status,
+                    "description": description,
+                }
+
+    # Handle both single-page objects and multi-page arrays
+    reports = axe_data if isinstance(axe_data, list) else [axe_data]
+
+    for report in reports:
+        process_rules(report.get("violations", []), is_pass=False)
+        process_rules(report.get("passes", []), is_pass=True)
+
+    # Write JSONL
+    written = 0
+    with open(output_jsonl_path, 'w', encoding='utf-8') as f:
+        for state_html, rules in state_map.items():
+            questions = {
+                rid: {
+                    "type": "noul",
+                    "instructions": generate_instruction(rid, rdata["description"]),
+                }
+                for rid, rdata in rules.items()
+            }
+            answers = {
+                rid: {"type": "noul", "noul": rdata["status"]}
+                for rid, rdata in rules.items()
+            }
+            row = {"state": state_html, "questions": questions, "answers": answers}
+            f.write(json.dumps(row) + "
+")
+            written += 1
+
+    print(f"Converted {written} unique HTML states → {output_jsonl_path}")
+
+if __name__ == "__main__":
+    convert_axe_to_strands("axe-audit-results.json", "data/wcag/train.jsonl")
+```
+
+### Key Behaviors
+
+- **Deduplication.** Using `defaultdict(dict)` with HTML as the key automatically deduplicates identical elements across the dataset — no overlapping training states.
+- **Consolidated questions.** If a `<button>` fails `label` but passes `aria-valid-attr-value`, both rules attach to the same state in one JSONL row, matching how Strands Decider evaluates in production.
+- **Fallback instruction generator.** Axe-core descriptions are written as active commands ("Ensures buttons have discernible text"). The fallback wraps them into prompt-friendly Yes/No questions.
+
+### Full Pipeline Integration
+
+```python
+# Step 1: Chunk the page
+chunker = SemanticHTMLChunker(max_tokens=3000)
+raw_chunks = chunker.process_page(html_content)
+
+# Step 2: Filter non-auditable noise
+valid_chunks = filter_chunks(raw_chunks)
+
+# Step 3: Run axe-core via Playwright for ground truth
+generate_training_data(valid_chunks, "data/wcag/train.jsonl")
+
+# Alternative: Use pre-existing axe JSON report
+# convert_axe_to_strands("axe-report.json", "data/wcag/train.jsonl")
+```
+
 ```python
 def process_page(self, html_content: str) -> list[str]:
     soup = self.clean_dom(html_content)
