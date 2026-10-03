@@ -680,6 +680,158 @@ def filter_chunks(chunks: list[str]) -> list[str]:
 
 Hook it into `process_page` after chunking:
 
+
+## Axe-Core Ground Truth Pipeline
+
+To generate ground truth labels for training, execute axe-core on each filtered chunk via Playwright (axe-core requires a rendered DOM for rules like visibility and contrast).
+
+### Prerequisites
+
+```bash
+pip install playwright axe-playwright-python
+playwright install chromium
+```
+
+### Pipeline Script
+
+```python
+import json
+from playwright.sync_api import sync_playwright
+from axe_playwright_python.sync_playwright import Axe
+
+# Map axe-core rule IDs to human-readable questions
+RULE_QUESTIONS = {
+    "image-alt":         "Does this HTML snippet provide alternative text for all images?",
+    "button-name":       "Do all buttons in this snippet have discernible text?",
+    "label":             "Are all form inputs in this snippet properly associated with a label?",
+    "link-name":         "Do all links in this snippet have discernible text?",
+    "aria-roles":        "Are all ARIA roles used in this snippet valid?",
+    "aria-allowed-attr": "Are all ARIA attributes allowed for their roles?",
+    "tabindex":          "Are tabindex values set to prevent keyboard traps?",
+    "meta-viewport":     "Does this snippet include a usable meta viewport tag?",
+    "object-alt":        "Are all embedded objects in this snippet accessible?",
+}
+
+def generate_instruction(rule_id: str) -> str:
+    """Returns a formatted Yes/No question for the model."""
+    return RULE_QUESTIONS.get(rule_id, f"Does this snippet pass the WCAG rule: {rule_id}?")
+
+def generate_training_data(
+    chunks: list[str],
+    output_filename: str = "data/wcag/train.jsonl"
+) -> None:
+    """
+    Renders each HTML chunk in a headless browser, runs axe-core,
+    and writes results as JSONL in Strands Decider format.
+    """
+    axe = Axe()
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        with open(output_filename, 'a', encoding='utf-8') as f:
+            for i, chunk in enumerate(chunks):
+                wrapped_html = f"""
+                <!DOCTYPE html>
+                <html lang="en">
+                <head><title>Audit</title></head>
+                <body>{chunk}</body>
+                </html>
+                """
+
+                page.set_content(wrapped_html)
+                results = axe.run(page)
+
+                evaluated_rules = {}
+
+                # Passes → noul: 1
+                for item in results.passes:
+                    evaluated_rules[item["id"]] = 1
+
+                # Violations → noul: 0
+                for item in results.violations:
+                    evaluated_rules[item["id"]] = 0
+
+                if not evaluated_rules:
+                    continue
+
+                questions = {}
+                answers = {}
+
+                for rule_id, status in evaluated_rules.items():
+                    # Skip color-contrast: model cannot evaluate visual attributes
+                    # without the rendered CSS (strands-decider receives raw HTML)
+                    if rule_id == "color-contrast":
+                        continue
+
+                    questions[rule_id] = {
+                        "type": "noul",
+                        "instructions": generate_instruction(rule_id)
+                    }
+                    answers[rule_id] = {
+                        "type": "noul",
+                        "noul": status
+                    }
+
+                if questions:
+                    data_row = {
+                        "state": chunk,
+                        "questions": questions,
+                        "answers": answers
+                    }
+                    f.write(json.dumps(data_row) + '
+')
+                    print(f"Chunk {i+1}: {len(questions)} rules recorded.")
+
+        browser.close()
+```
+
+### Key Considerations
+
+**CSS reality check.** axe-core computes color contrast from live CSS in the browser. Strands Decider receives raw HTML — no stylesheet. It cannot physically calculate contrast ratios. The script skips `color-contrast` because training a text model on a visual attribute without CSS data causes hallucination.
+
+**Class imbalance.** Webpages pass far more rules than they fail. If 95% of labels are `noul: 1` (pass), the model overfits to "yes." Downsample passes after collection so the final dataset is roughly 50/50 passes and violations.
+
+**File placement.** Save `train.jsonl` and a small `test.jsonl` split into `data/wcag/` before running `bash training/recipe.sh all`.
+
+### Integration with Full Pipeline
+
+```python
+from semantic_chunker import SemanticHTMLChunker
+from chunk_filter import filter_chunks
+from axe_pipeline import generate_training_data
+
+chunker = SemanticHTMLChunker(max_tokens=3000)
+raw_chunks = chunker.process_page(html_content)
+valid_chunks = filter_chunks(raw_chunks)
+generate_training_data(valid_chunks, "data/wcag/train.jsonl")
+```
+
+### Expanded Axe Rule Coverage
+
+Additional rules to capture beyond the starter set above:
+
+| Rule ID | Question |
+|---|---|
+| `heading-order` | Is the heading hierarchy logical and ascending? |
+| `ident-unique` | Are all IDs in this snippet unique? |
+| `form-field-multiple-labels` | Does each input have only one associated label? |
+| `input-image-alt` | Does an image-button input have accessible text? |
+| `img-alt-formula` | Does an image used as a form field have accessible text? |
+| `no-autocomplete` | Are form inputs missing autocomplete attributes? |
+| `valid-lang` | Is the language attribute valid and supported? |
+| `document-title` | Does the snippet have a descriptive document title? |
+| `html-lang` | Does the root element have a valid lang attribute? |
+| `accesskeys` | Are accesskey attributes used safely? |
+| `focus-order-semantics` | Is the tab order meaningful? |
+| `img-redundant-alt` | Does redundant alt text exist on navigation images? |
+| `language-direction` | Is the text direction appropriate for the language? |
+| `video-caption` | Is there a caption track for video elements? |
+| `audio-caption` | Is there a caption or transcript for audio? |
+| `list-role-mismatch` | Is the ARIA role appropriate for list elements? |
+| `parsing` | Is the HTML syntactically valid? |
+| `presentation-role-conflict` | Is there a conflict between role and presentation semantics? |
 ```python
 def process_page(self, html_content: str) -> list[str]:
     soup = self.clean_dom(html_content)
