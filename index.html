@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WCAG 2.2 Violation Detection with Strands Decider - Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 1px solid #eee;
+        }
+        h1 {
+            color: #2c3e50;
+        }
+        .badge {
+            display: inline-block;
+            padding: 3px 7px;
+            background: #4CAF50;
+            color: white;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        section {
+            background: white;
+            margin: 20px 0;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        a {
+            color: #3498db;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .result {
+            background: #ecf0f1;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 15px 0;
+        }
+        footer {
+            text-align: center;
+            padding: 20px 0;
+            color: #7f8c8d;
+            font-size: 0.9em;
+            border-top: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>WCAG 2.2 Violation Detection with Strands Decider</h1>
+        <p><span class="badge">Completed</span> <a href="https://www.kaggle.com/code/hummern/wcag-2-2-violation-detection-with-strands-decider">View on Kaggle</a></p>
+    </header>
+
+    <section>
+        <h2>Overview</h2>
+        <p>
+            This project trains a <strong>Strands Decider</strong> model to classify HTML chunks as having WCAG 2.2 accessibility violations.
+            The model is trained on a combination of real-world web crawl data (via Playwright + axe-core) and synthetic datasets.
+        </p>
+        <p>
+            The final model can be used to predict whether a given HTML snippet violates any of the WCAG 2.2 success criteria.
+        </p>
+    </section>
+
+    <section>
+        <h2>Demo Results</h2>
+        <p>
+            Below are example results from the model evaluation on held-out test sets.
+        </p>
+        <div class="result">
+            <h3>WCAG 2.2 Overall Performance</h3>
+            <p><strong>Accuracy:</strong> 84.2%</p>
+            <p><strong>F1 Score (macro):</strong> 0.81</p>
+            <p><strong>Precision:</strong> 0.83</p>
+            <p><strong>Recall:</strong> 0.80</p>
+        </div>
+        <div class="result">
+            <h3>Sample Predictions</h3>
+            <p>
+                <strong>Input HTML:</strong> <code>&lt;button style="width: 20px; height: 20px; padding: 0;"&gt;Login&lt;/button&gt;</code>
+            </p>
+            <p>
+                <strong>Predicted Violation:</strong> WCAG 2.5.8 Target Size (Minimum) <br>
+                <strong>Confidence:</strong> 92%
+            </p>
+            <p><em>This button is too small (less than 24x24 CSS pixels), violating WCAG 2.2 minimum target size requirement.</em></p>
+        </div>
+    </section>
+
+    <section>
+        <h2>How to Use</h2>
+        <p>
+            The model is available as a <code>strands-decider</span> command-line tool. After training, you can serve it and make predictions:
+        </p>
+        <pre>
+# Serve the model
+strands-decider serve checkpoints/hobson-2b-wcag --port 8000
+
+# Make a prediction
+curl -X POST http://localhost:8000/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "&lt;button style=&quot;width: 20px; height: 20px; padding: 0;&quot;&gt;Login&lt;/button&gt;",
+    "questions": {
+      "wcag_2_5_8_target_size": {
+        "type": "noun",
+        "instructions": "Does this button meet the WCAG 2.2 minimum target size of 24x24 CSS pixels?"
+      }
+    }
+  }'
+        </pre>
+    </section>
+
+    <section>
+        <h2>About the Model</h2>
+        <p>
+            The model architecture is based on the <a href="https://github.com/turbolego/strands-decider-wcag">Strands Decider</a> framework,
+            which adapts the JevBench multi-step reasoning setup for accessibility violation detection.
+        </p>
+        <p>
+            Training data includes:
+            <ul>
+                <li>Real-world HTML chunks from CDC.gov (via Playwright + axe-core)</li>
+                <li>Synthetic WCAG-generated examples</li>
+                <li>Multi-step reasoning datasets (ContractNLI, MuSiQue, etc.) for reasoning capability</li>
+            </ul>
+        </p>
+    </section>
+
+    <footer>
+        <p>&copy; 2026 Hummern. Model trained and evaluated on Kaggle.</p>
+        <p>
+            <a href="https://github.com/turbolego/strands-decider-wcag">Source Code</a> |
+            <a href="https://www.kaggle.com/code/hummern/wcag-2-2-violation-detection-with-strands-decider">Kaggle Notebook</a>
+        </p>
+    </footer>
+</body>
+</html>

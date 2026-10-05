@@ -1,0 +1,13 @@
+{
+  "id": "hummern/wcag-2-2-violation-detection-with-strands-decider",
+  "title": "WCAG 2.2 Violation Detection with Strands Decider",
+  "code_file": "kaggle_wcag_training.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
